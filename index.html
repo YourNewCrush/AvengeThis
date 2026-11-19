@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AvengeThis Countdown Editor</title>
+<style>
+:root{--bg:#f3f5f3;--panel:#fff;--ink:#16211b;--mute:#5d6b63;--line:#d3dad5;--accent:#1f6b4a;--accent-ink:#fff;--bad:#b3261e}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]){--bg:#101613;--panel:#18211c;--ink:#e6ece8;--mute:#93a39a;--line:#2b3a31;--accent:#5fc796;--accent-ink:#08150e;--bad:#ff8a80}}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--bg);color:var(--ink);font:15px/1.45 system-ui,-apple-system,Segoe UI,sans-serif;padding:max(16px,env(safe-area-inset-top)) 16px max(16px,env(safe-area-inset-bottom))}
+main{max-width:1100px;margin:0 auto;display:grid;gap:16px}
+h1{font-size:20px;margin:0 0 4px}
+p.sub{margin:0;color:var(--mute)}
+#frame{width:100%;aspect-ratio:1750/750;overflow:hidden;border:1px solid var(--line);border-radius:6px;background:#000;position:relative}
+#stage{position:absolute;left:0;top:0;width:1750px;height:750px;transform-origin:0 0;background:#0b130f center/cover no-repeat;display:flex;align-items:center;justify-content:center}
+#blocks{display:flex;align-items:center;white-space:nowrap;font-variant-numeric:tabular-nums;line-height:1}
+#blocks span{display:inline-block;text-align:center;min-width:2ch}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:16px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px}
+label{display:grid;gap:4px;font-weight:600;font-size:13px}
+label small{font-weight:400;color:var(--mute)}
+input,select,button{font:inherit;color:var(--ink);background:var(--bg);border:1px solid var(--line);border-radius:5px;padding:8px 10px;min-height:40px}
+input[type=color]{padding:2px;width:100%}
+input[type=range]{padding:0;accent-color:var(--accent)}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+button{cursor:pointer;font-weight:600}
+button.primary{background:var(--accent);color:var(--accent-ink);border-color:var(--accent);padding:8px 18px}
+button:disabled{opacity:.45;cursor:not-allowed}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+#status{min-height:1.4em;color:var(--mute)}
+#status.bad{color:var(--bad)}
+code{background:var(--bg);padding:2px 6px;border-radius:4px;border:1px solid var(--line)}
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>AvengeThis countdown</h1>
+    <p class="sub">Change the settings, check the preview, then send to the Pi. Preview is the 1750 × 750 display, scaled down.</p>
+  </header>
+
+  <div id="frame"><div id="stage"><div id="blocks"><span>00</span><span>00</span><span>00</span></div></div></div>
+
+  <section class="panel">
+    <div class="grid">
+      <label>Font <select id="font"></select><small>Files from the <code>fonts/</code> folder in your repo</small></label>
+      <label>Background <select id="bg"></select><small>Files from the <code>backgrounds/</code> folder</small></label>
+      <label>Countdown to <input type="datetime-local" id="target"><small>Uses your device's time zone, saved as UTC</small></label>
+      <label>Text colour <input type="color" id="color"></label>
+      <label>Size: <output id="o_fontSize"></output> px <input type="range" id="fontSize" min="40" max="600"></label>
+      <label>Space between numbers: <output id="o_gap"></output> px <input type="range" id="gap" min="0" max="600"></label>
+      <label>Move left / right: <output id="o_offsetX"></output> px <input type="range" id="offsetX" min="-875" max="875"></label>
+      <label>Move up / down: <output id="o_offsetY"></output> px <input type="range" id="offsetY" min="-375" max="375"></label>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="row">
+      <input id="email" type="email" placeholder="Email" autocomplete="username" aria-label="Email">
+      <input id="pass" type="password" placeholder="Password" autocomplete="current-password" aria-label="Password">
+      <button id="login">Sign in</button>
+      <button id="logout" hidden>Sign out</button>
+    </div>
+    <div class="row" style="margin-top:12px">
+      <button class="primary" id="send" disabled>Send to Pi</button>
+      <span>Live passcode: <code id="live">…</code></span>
+    </div>
+    <p id="status" role="status"></p>
+  </section>
+</main>
+
+<script type="module">
+import {initializeApp} from "https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js";
+import {getDatabase, ref, get, update} from "https://www.gstatic.com/firebasejs/10.14.1/firebase-database.js";
+import {getAuth, signInWithEmailAndPassword, signOut, onAuthStateChanged} from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
+
+/* ====== EDIT THESE (Firebase console > Project settings > Your apps > Web app) ====== */
+const firebaseConfig = {
+  apiKey: "YOUR_API_KEY",
+  authDomain: "YOUR_PROJECT.firebaseapp.com",
+  databaseURL: "https://YOUR_PROJECT-default-rtdb.firebaseio.com",
+  projectId: "YOUR_PROJECT_ID",
+  appId: "YOUR_APP_ID"
+};
+const GITHUB = {owner: "YOUR_GITHUB_USERNAME", repo: "AvengeThis"};
+/* ================================================================================ */
+
+const DEFAULTS = {font:"", bg:"", fontSize:260, gap:140, offsetX:0, offsetY:0, color:"#d9d9d9",
+                  target:new Date(Date.now()+30*864e5).toISOString()};
+const $ = id => document.getElementById(id);
+const say = (t,bad) => { $("status").textContent = t; $("status").className = bad ? "bad" : ""; };
+const db = getDatabase(initializeApp(firebaseConfig));
+const auth = getAuth();
+let specs = {...DEFAULTS};
+
+/* Passcode pattern: 3 capitals + 3 digits + 1 capital + 1 lowercase, e.g. PTM086He */
+const PATTERN = /^[A-Z]{3}[0-9]{3}[A-Z][a-z]$/;
+const pick = (s,n) => Array.from({length:n}, () => s[crypto.getRandomValues(new Uint32Array(1))[0] % s.length]).join("");
+const newPasscode = () => pick("ABCDEFGHJKLMNPQRSTUVWXYZ",3) + pick("0123456789",3) + pick("ABCDEFGHJKLMNPQRSTUVWXYZ",1) + pick("abcdefghijkmnpqrstuvwxyz",1);
+
+/* Scale the 1750x750 stage into whatever width the page has */
+const fit = () => { $("stage").style.transform = `scale(${$("frame").clientWidth/1750})`; };
+new ResizeObserver(fit).observe($("frame"));
+
+/* Render preview */
+function render(){
+  const s = specs, b = $("blocks");
+  b.style.fontSize = s.fontSize + "px";
+  b.style.gap = s.gap + "px";
+  b.style.color = s.color;
+  b.style.fontFamily = s.font ? `"cd-${s.font}", sans-serif` : "sans-serif";
+  b.style.transform = `translate(${s.offsetX}px, ${s.offsetY}px)`;
+  b.style.fontWeight = "800";
+  $("stage").style.backgroundImage = s.bg ? `url("backgrounds/${encodeURI(s.bg)}")` : "none";
+  tick();
+}
+function tick(){
+  let ms = Math.max(0, new Date(specs.target) - Date.now());
+  const d = Math.floor(ms/864e5), h = Math.floor(ms%864e5/36e5), m = Math.floor(ms%36e5/6e4);
+  [d,h,m].forEach((v,i) => $("blocks").children[i].textContent = String(v).padStart(2,"0"));
+}
+setInterval(tick, 1000);
+
+/* Controls <-> specs */
+const sliders = ["fontSize","gap","offsetX","offsetY"];
+function toControls(){
+  sliders.forEach(k => { $(k).value = specs[k]; $("o_"+k).textContent = specs[k]; });
+  $("color").value = specs.color; $("font").value = specs.font; $("bg").value = specs.bg;
+  const t = new Date(specs.target);
+  $("target").value = new Date(t - t.getTimezoneOffset()*6e4).toISOString().slice(0,16);
+}
+sliders.forEach(k => $(k).oninput = e => { specs[k] = +e.target.value; $("o_"+k).textContent = specs[k]; render(); });
+$("color").oninput = e => { specs.color = e.target.value; render(); };
+$("font").onchange = e => { specs.font = e.target.value; render(); };
+$("bg").onchange = e => { specs.bg = e.target.value; render(); };
+$("target").onchange = e => { if(e.target.value){ specs.target = new Date(e.target.value).toISOString(); render(); } };
+
+/* List files from the repo folders (public repo, GitHub API) */
+async function listFolder(folder){
+  try{
+    const r = await fetch(`https://api.github.com/repos/${GITHUB.owner}/${GITHUB.repo}/contents/${folder}`);
+    if(!r.ok) return [];
+    return (await r.json()).filter(f => f.type==="file" && !f.name.startsWith(".")).map(f => f.name);
+  }catch{ return []; }
+}
+async function loadFiles(){
+  const [fonts, bgs] = await Promise.all([listFolder("fonts"), listFolder("backgrounds")]);
+  $("font").innerHTML = '<option value="">(system font)</option>' + fonts.map(f=>`<option>${f}</option>`).join("");
+  $("bg").innerHTML = '<option value="">(none)</option>' + bgs.map(f=>`<option>${f}</option>`).join("");
+  for(const f of fonts){
+    try{ document.fonts.add(await new FontFace("cd-"+f, `url("fonts/${encodeURI(f)}")`).load()); }catch{}
+  }
+}
+
+/* Load what is currently live */
+async function loadLive(){
+  try{
+    const snap = await get(ref(db,"countdown"));
+    const v = snap.val();
+    if(v){ specs = {...DEFAULTS, ...v.specs}; $("live").textContent = v.passcode || "none"; }
+    else $("live").textContent = "none yet";
+  }catch(e){ say("Could not read the database: " + e.message, true); }
+}
+
+/* Auth + send */
+onAuthStateChanged(auth, u => {
+  $("send").disabled = !u; $("logout").hidden = !u; $("login").hidden = !!u;
+  $("email").hidden = $("pass").hidden = !!u;
+  if(u) say("Signed in as " + u.email);
+});
+$("login").onclick = async () => {
+  try{ await signInWithEmailAndPassword(auth, $("email").value, $("pass").value); }
+  catch(e){ say("Sign in failed: " + e.code, true); }
+};
+$("logout").onclick = () => signOut(auth);
+$("send").onclick = async () => {
+  const code = newPasscode();
+  if(!PATTERN.test(code)) return say("Passcode did not match the pattern.", true);
+  try{
+    $("send").disabled = true;
+    await update(ref(db), {"countdown/specs": specs, "countdown/passcode": code});
+    $("live").textContent = code;
+    say("Sent. The Pi will pick this up on its next check.");
+  }catch(e){ say("Send failed: " + e.message, true); }
+  $("send").disabled = !auth.currentUser;
+};
+
+await loadFiles();
+await loadLive();
+toControls(); fit(); render();
+</script>
+</body>
+</html>
